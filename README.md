@@ -2,6 +2,8 @@
 
 Simple Alpine-based container that updates a Cloudflare DNS record at a fixed interval.
 
+**NOTE:** This is the result of experimenting with [ChatGPT Codex](https://chatgpt.com/codex), beware of AI slop!
+
 ## Environment variables
 Required:
 - `CF_API_TOKEN`: Cloudflare API token with DNS edit permissions
