@@ -1,0 +1,10 @@
+services:
+  cloudflare-ddns:
+    image: cloudflare-ddns
+    build: .
+    restart: unless-stopped
+    environment:
+      CF_API_TOKEN: "..."
+      CF_RECORD_NAME: "home.example.com"
+      INTERVAL_SECONDS: "300"
+      HEALTHCHECKS_IO_URL: "https://hc-ping.com/your-uuid"
