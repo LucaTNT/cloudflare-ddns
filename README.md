@@ -1,6 +1,6 @@
 # cloudflare-ddns (Alpine)
 
-Simple Alpine-based container that updates a Cloudflare DNS record at a fixed interval.
+Simple Alpine-based container that updates a Cloudflare DNS record at a fixed interval to the current public IP.
 
 **NOTE:** This is the result of experimenting with [ChatGPT Codex](https://chatgpt.com/codex), beware of AI slop!
 
