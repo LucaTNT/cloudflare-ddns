@@ -5,9 +5,14 @@ log() {
   printf '%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"
 }
 
+url_encode() {
+  jq -rn --arg v "$1" '$v|@uri'
+}
+
 require_env() {
   var_name="$1"
-  if [ -z "${!var_name:-}" ]; then
+  eval "var_value=\"\${${var_name}:-}\""
+  if [ -z "${var_value}" ]; then
     log "Missing required env var: ${var_name}"
     exit 2
   fi
@@ -28,10 +33,15 @@ page=1
 per_page=50
 
 while true; do
-  zones_resp="$(curl -fsS \
+  zones_resp="$(curl -sS \
     -H "Authorization: Bearer ${CF_API_TOKEN}" \
     -H "Content-Type: application/json" \
     "https://api.cloudflare.com/client/v4/zones?per_page=${per_page}&page=${page}")"
+
+  if [ "$(echo "${zones_resp}" | jq -r '.success // false')" != "true" ]; then
+    log "Failed to list zones: $(echo "${zones_resp}" | jq -c '.errors')"
+    exit 3
+  fi
 
   zone_count="$(echo "${zones_resp}" | jq -r '.result | length')"
   if [ "${zone_count}" -eq 0 ]; then
@@ -56,10 +66,14 @@ while true; do
 done
 
 if [ -n "${CF_ZONE_NAME}" ]; then
-  zone_resp="$(curl -fsS \
+  zone_resp="$(curl -sS \
     -H "Authorization: Bearer ${CF_API_TOKEN}" \
     -H "Content-Type: application/json" \
-    "https://api.cloudflare.com/client/v4/zones?name=${CF_ZONE_NAME}")"
+    "https://api.cloudflare.com/client/v4/zones?name=$(url_encode "${CF_ZONE_NAME}")")"
+  if [ "$(echo "${zone_resp}" | jq -r '.success // false')" != "true" ]; then
+    log "Failed to look up zone id: $(echo "${zone_resp}" | jq -c '.errors')"
+    exit 3
+  fi
   CF_ZONE_ID="$(echo "${zone_resp}" | jq -r '.result[0].id // empty')"
 fi
 
@@ -72,10 +86,15 @@ log "Resolved zone ${CF_ZONE_NAME} (${CF_ZONE_ID}) for ${CF_RECORD_NAME}"
 
 # Determine record id for A record
 log "Looking up record id for ${CF_RECORD_NAME} (A) in zone ${CF_ZONE_ID}"
-lookup_resp="$(curl -fsS \
+lookup_resp="$(curl -sS \
   -H "Authorization: Bearer ${CF_API_TOKEN}" \
   -H "Content-Type: application/json" \
-  "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/dns_records?type=A&name=${CF_RECORD_NAME}")"
+  "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/dns_records?type=A&name=$(url_encode "${CF_RECORD_NAME}")")"
+
+if [ "$(echo "${lookup_resp}" | jq -r '.success // false')" != "true" ]; then
+  log "Record lookup failed: $(echo "${lookup_resp}" | jq -c '.errors')"
+  exit 4
+fi
 
 CF_RECORD_ID="$(echo "${lookup_resp}" | jq -r '.result[0].id // empty')"
 
@@ -93,10 +112,14 @@ if [ -z "${current_ip}" ]; then
 fi
 
 # Fetch existing record content
-record_resp="$(curl -fsS \
+record_resp="$(curl -sS \
   -H "Authorization: Bearer ${CF_API_TOKEN}" \
   -H "Content-Type: application/json" \
-  "https://api.cloudflare.com/client/v4/dns_records/${CF_RECORD_ID}")"
+  "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/dns_records/${CF_RECORD_ID}")"
+if [ "$(echo "${record_resp}" | jq -r '.success // false')" != "true" ]; then
+  log "Failed to read DNS record details: $(echo "${record_resp}" | jq -c '.errors')"
+  exit 5
+fi
 
 record_name="$(echo "${record_resp}" | jq -r '.result.name // empty')"
 record_content="$(echo "${record_resp}" | jq -r '.result.content // empty')"
@@ -125,11 +148,11 @@ update_payload=$(jq -n \
   --argjson proxied false \
   '{type: $type, name: $name, content: $content, ttl: $ttl, proxied: $proxied}')
 
-update_resp="$(curl -fsS -X PUT \
+update_resp="$(curl -sS -X PUT \
   -H "Authorization: Bearer ${CF_API_TOKEN}" \
   -H "Content-Type: application/json" \
   --data "${update_payload}" \
-  "https://api.cloudflare.com/client/v4/dns_records/${CF_RECORD_ID}")"
+  "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/dns_records/${CF_RECORD_ID}")"
 
 success="$(echo "${update_resp}" | jq -r '.success // false')"
 
