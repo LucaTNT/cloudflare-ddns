@@ -20,6 +20,12 @@ Optional:
 docker build -t cloudflare-ddns .
 ```
 
+## Build + Push (multi-arch)
+
+```
+IMAGE_NAME=ghcr.io/you/cloudflare-ddns ./build-image.sh latest 1.2.3
+```
+
 ## Run
 
 ```
