@@ -28,12 +28,20 @@ IMAGE_NAME=ghcr.io/you/cloudflare-ddns ./build-image.sh latest 1.2.3
 
 ## Run
 
+Pull the prebuilt image from GitHub Container Registry:
+
+```bash
+docker pull ghcr.io/<owner>/cloudflare-ddns:latest
+```
+
+Then run it:
+
 ```
 docker run --rm \
   -e CF_API_TOKEN=... \
   -e CF_RECORD_NAME=home.example.com \
   -e INTERVAL_SECONDS=300 \
-  cloudflare-ddns
+  ghcr.io/<owner>/cloudflare-ddns:latest
 ```
 
 ## Docker Compose example
@@ -41,8 +49,7 @@ docker run --rm \
 ```yaml
 services:
   cloudflare-ddns:
-    image: cloudflare-ddns
-    build: .
+    image: ghcr.io/<owner>/cloudflare-ddns:latest
     restart: unless-stopped
     environment:
       CF_API_TOKEN: "..."
