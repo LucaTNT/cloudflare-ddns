@@ -12,7 +12,7 @@ Required:
 Optional:
 - `INTERVAL_SECONDS`: update interval in seconds (default: `300`)
 - `IP_PROVIDER_URL`: URL returning your public IP (default: `https://api.ipify.org`)
-- `HEALTHCHECKS_IO_URL`: healthchecks.io URL (optional). When set, the container pings `/start`, `/` on success, and `/fail` on failures.
+- `HEALTHCHECKS_IO_URL`: healthchecks.io URL (optional). When set, the container pings `/start` at run start, then sends a single timestamp-prefixed log payload to `/` on success or `/fail` on failure.
 
 ## Build
 
