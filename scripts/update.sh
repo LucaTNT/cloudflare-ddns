@@ -35,6 +35,28 @@ curl_json() {
   done
 }
 
+resolve_dns_a() {
+  name="$1"
+
+  if command -v getent >/dev/null 2>&1; then
+    ip="$(getent ahostsv4 "${name}" | awk 'NF {print $1; exit}')"
+    if [ -n "${ip}" ]; then
+      echo "${ip}"
+      return 0
+    fi
+  fi
+
+  if command -v nslookup >/dev/null 2>&1; then
+    ip="$(nslookup "${name}" 2>/dev/null | awk '/^Address([[:space:]][0-9]+)?:[[:space:]]/ {print $NF; exit}')"
+    if [ -n "${ip}" ]; then
+      echo "${ip}"
+      return 0
+    fi
+  fi
+
+  return 1
+}
+
 require_env() {
   var_name="$1"
   eval "var_value=\"\${${var_name}:-}\""
@@ -123,33 +145,14 @@ if [ "$(echo "${lookup_resp}" | jq -r '.success // false')" != "true" ]; then
 fi
 
 CF_RECORD_ID="$(echo "${lookup_resp}" | jq -r '.result[0].id // empty')"
+record_name="$(echo "${lookup_resp}" | jq -r '.result[0].name // empty')"
+record_type="$(echo "${lookup_resp}" | jq -r '.result[0].type // empty')"
+record_content_api="$(echo "${lookup_resp}" | jq -r '.result[0].content // empty')"
 
 if [ -z "${CF_RECORD_ID}" ]; then
   log "Could not find DNS record id. Check CF_RECORD_NAME."
   exit 4
 fi
-
-# Fetch public IP
-current_ip="$(curl -fsS "${IP_PROVIDER_URL}")"
-
-if [ -z "${current_ip}" ]; then
-  log "Failed to fetch public IP"
-  exit 4
-fi
-
-# Fetch existing record content
-record_resp="$(curl_json \
-  "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/dns_records/${CF_RECORD_ID}" \
-  -H "Authorization: Bearer ${CF_API_TOKEN}" \
-  -H "Content-Type: application/json")" || exit 5
-if [ "$(echo "${record_resp}" | jq -r '.success // false')" != "true" ]; then
-  log "Failed to read DNS record details: $(echo "${record_resp}" | jq -c '.errors')"
-  exit 5
-fi
-
-record_name="$(echo "${record_resp}" | jq -r '.result.name // empty')"
-record_content="$(echo "${record_resp}" | jq -r '.result.content // empty')"
-record_type="$(echo "${record_resp}" | jq -r '.result.type // empty')"
 
 if [ -z "${record_name}" ] || [ -z "${record_type}" ]; then
   log "Failed to read DNS record details"
@@ -161,8 +164,30 @@ if [ "${record_type}" != "A" ]; then
   exit 6
 fi
 
+# Fetch public IP
+current_ip="$(curl -fsS "${IP_PROVIDER_URL}")"
+
+if [ -z "${current_ip}" ]; then
+  log "Failed to fetch public IP"
+  exit 4
+fi
+
+record_content_dns="$(resolve_dns_a "${record_name}" 2>/dev/null || true)"
+
+if [ -n "${record_content_dns}" ]; then
+  record_content="${record_content_dns}"
+  log "Detected current DNS A record via resolver: ${record_content}"
+elif [ -n "${record_content_api}" ]; then
+  record_content="${record_content_api}"
+  log "DNS lookup failed; falling back to Cloudflare API record content"
+else
+  log "Failed to determine current DNS record content via DNS or Cloudflare API"
+  exit 5
+fi
+
 if [ "${record_content}" = "${current_ip}" ]; then
   log "No change: ${record_name} already set to ${current_ip}"
+  echo "$(date +%s)" >/tmp/last_success 2>/dev/null || true
   exit 0
 fi
 
