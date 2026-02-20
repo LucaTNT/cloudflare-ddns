@@ -24,37 +24,15 @@ curl_json() {
     }
 
     if [ "${attempt}" -ge "${max_attempts}" ]; then
-      log "Request failed after ${attempt} attempts: ${url}"
+      log "Request failed after ${attempt} attempts: ${url}" >&2
       return 1
     fi
 
-    log "Request failed (attempt ${attempt}); retrying in ${delay}s"
+    log "Request failed (attempt ${attempt}); retrying in ${delay}s" >&2
     sleep "${delay}"
     attempt=$((attempt + 1))
     delay=$((delay * 2))
   done
-}
-
-resolve_dns_a() {
-  name="$1"
-
-  if command -v getent >/dev/null 2>&1; then
-    ip="$(getent ahostsv4 "${name}" | awk 'NF {print $1; exit}')"
-    if [ -n "${ip}" ]; then
-      echo "${ip}"
-      return 0
-    fi
-  fi
-
-  if command -v nslookup >/dev/null 2>&1; then
-    ip="$(nslookup "${name}" 2>/dev/null | awk '/^Address([[:space:]][0-9]+)?:[[:space:]]/ {print $NF; exit}')"
-    if [ -n "${ip}" ]; then
-      echo "${ip}"
-      return 0
-    fi
-  fi
-
-  return 1
 }
 
 require_env() {
@@ -66,6 +44,10 @@ require_env() {
   fi
 }
 
+is_ipv4() {
+  echo "$1" | grep -Eq '^[0-9]{1,3}(\.[0-9]{1,3}){3}$'
+}
+
 require_env CF_API_TOKEN
 require_env CF_RECORD_NAME
 
@@ -74,7 +56,47 @@ require_env CF_RECORD_NAME
 now_epoch="$(date +%s)"
 echo "${now_epoch}" >/tmp/last_attempt 2>/dev/null || true
 
-# Determine zone id by matching the record name to the longest zone name suffix
+# Fetch existing DNS A value via plain DNS (UDP) against 1.1.1.1 first.
+if ! command -v nslookup >/dev/null 2>&1; then
+  log "nslookup is required to query DNS"
+  exit 3
+fi
+
+record_content="$(
+  nslookup -type=A "${CF_RECORD_NAME}" 1.1.1.1 2>/dev/null | \
+    awk '
+      /^Name:[[:space:]]*/ { in_answer=1; next }
+      in_answer {
+        for (i = 1; i <= NF; i++) {
+          if ($i ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) {
+            print $i
+            exit
+          }
+        }
+      }
+    '
+)"
+
+if [ -z "${record_content}" ] || ! is_ipv4 "${record_content}"; then
+  log "DNS lookup for ${CF_RECORD_NAME} did not return a valid A record"
+  exit 3
+fi
+
+# Fetch current public IP.
+current_ip="$(curl_json "${IP_PROVIDER_URL}")" || exit 4
+current_ip="$(printf '%s' "${current_ip}" | tr -d '[:space:]')"
+if [ -z "${current_ip}" ] || ! is_ipv4 "${current_ip}"; then
+  log "Failed to fetch a valid public IPv4 address"
+  exit 4
+fi
+
+if [ "${record_content}" = "${current_ip}" ]; then
+  log "No change: ${CF_RECORD_NAME} already set to ${current_ip}"
+  echo "$(date +%s)" >/tmp/last_success 2>/dev/null || true
+  exit 0
+fi
+
+# Determine zone id by matching the record name to the longest zone name suffix.
 CF_ZONE_ID=""
 CF_ZONE_NAME=""
 page=1
@@ -84,11 +106,11 @@ while true; do
   zones_resp="$(curl_json \
     "https://api.cloudflare.com/client/v4/zones?per_page=${per_page}&page=${page}" \
     -H "Authorization: Bearer ${CF_API_TOKEN}" \
-    -H "Content-Type: application/json")" || exit 3
+    -H "Content-Type: application/json")" || exit 5
 
   if [ "$(echo "${zones_resp}" | jq -r '.success // false')" != "true" ]; then
     log "Failed to list zones: $(echo "${zones_resp}" | jq -c '.errors')"
-    exit 3
+    exit 5
   fi
 
   zone_count="$(echo "${zones_resp}" | jq -r '.result | length')"
@@ -117,46 +139,39 @@ if [ -n "${CF_ZONE_NAME}" ]; then
   zone_resp="$(curl_json \
     "https://api.cloudflare.com/client/v4/zones?name=$(url_encode "${CF_ZONE_NAME}")" \
     -H "Authorization: Bearer ${CF_API_TOKEN}" \
-    -H "Content-Type: application/json")" || exit 3
+    -H "Content-Type: application/json")" || exit 5
   if [ "$(echo "${zone_resp}" | jq -r '.success // false')" != "true" ]; then
     log "Failed to look up zone id: $(echo "${zone_resp}" | jq -c '.errors')"
-    exit 3
+    exit 5
   fi
   CF_ZONE_ID="$(echo "${zone_resp}" | jq -r '.result[0].id // empty')"
 fi
 
 if [ -z "${CF_ZONE_ID}" ]; then
   log "Could not determine zone id for ${CF_RECORD_NAME}. Check Cloudflare zones and token permissions."
-  exit 3
+  exit 5
 fi
 
 log "Resolved zone ${CF_ZONE_NAME} (${CF_ZONE_ID}) for ${CF_RECORD_NAME}"
 
-# Determine record id for A record
+# Determine record id for A record.
 log "Looking up record id for ${CF_RECORD_NAME} (A) in zone ${CF_ZONE_ID}"
 lookup_resp="$(curl_json \
   "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/dns_records?type=A&name=$(url_encode "${CF_RECORD_NAME}")" \
   -H "Authorization: Bearer ${CF_API_TOKEN}" \
-  -H "Content-Type: application/json")" || exit 4
+  -H "Content-Type: application/json")" || exit 6
 
 if [ "$(echo "${lookup_resp}" | jq -r '.success // false')" != "true" ]; then
   log "Record lookup failed: $(echo "${lookup_resp}" | jq -c '.errors')"
-  exit 4
+  exit 6
 fi
 
 CF_RECORD_ID="$(echo "${lookup_resp}" | jq -r '.result[0].id // empty')"
-record_name="$(echo "${lookup_resp}" | jq -r '.result[0].name // empty')"
 record_type="$(echo "${lookup_resp}" | jq -r '.result[0].type // empty')"
-record_content_api="$(echo "${lookup_resp}" | jq -r '.result[0].content // empty')"
 
 if [ -z "${CF_RECORD_ID}" ]; then
   log "Could not find DNS record id. Check CF_RECORD_NAME."
-  exit 4
-fi
-
-if [ -z "${record_name}" ] || [ -z "${record_type}" ]; then
-  log "Failed to read DNS record details"
-  exit 5
+  exit 6
 fi
 
 if [ "${record_type}" != "A" ]; then
@@ -164,36 +179,9 @@ if [ "${record_type}" != "A" ]; then
   exit 6
 fi
 
-# Fetch public IP
-current_ip="$(curl -fsS "${IP_PROVIDER_URL}")"
-
-if [ -z "${current_ip}" ]; then
-  log "Failed to fetch public IP"
-  exit 4
-fi
-
-record_content_dns="$(resolve_dns_a "${record_name}" 2>/dev/null || true)"
-
-if [ -n "${record_content_dns}" ]; then
-  record_content="${record_content_dns}"
-  log "Detected current DNS A record via resolver: ${record_content}"
-elif [ -n "${record_content_api}" ]; then
-  record_content="${record_content_api}"
-  log "DNS lookup failed; falling back to Cloudflare API record content"
-else
-  log "Failed to determine current DNS record content via DNS or Cloudflare API"
-  exit 5
-fi
-
-if [ "${record_content}" = "${current_ip}" ]; then
-  log "No change: ${record_name} already set to ${current_ip}"
-  echo "$(date +%s)" >/tmp/last_success 2>/dev/null || true
-  exit 0
-fi
-
 update_payload=$(jq -n \
   --arg type "A" \
-  --arg name "${record_name}" \
+  --arg name "${CF_RECORD_NAME}" \
   --arg content "${current_ip}" \
   --argjson ttl 1 \
   --argjson proxied false \
@@ -213,5 +201,5 @@ if [ "${success}" != "true" ]; then
   exit 7
 fi
 
-log "Updated ${record_name} from ${record_content} to ${current_ip}"
+log "Updated ${CF_RECORD_NAME} from ${record_content} to ${current_ip}"
 echo "$(date +%s)" >/tmp/last_success 2>/dev/null || true
